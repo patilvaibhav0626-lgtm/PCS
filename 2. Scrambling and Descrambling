@@ -1,0 +1,74 @@
+%% scrambler_lfsr_demo.m
+% Pure MATLAB LFSR-based scrambler + descrambler demo
+% Polynomial exponents example: poly_exp = [7 4] meaning x^7 + x^4 + 1
+
+clear; clc;
+
+% ------------------ User parameters ------------------
+poly_exp   = [7 4];             % polynomial exponents, e.g. [7 4] for x^7 + x^4 + 1
+init_state = [1 0 0 0 0 0 1];   % length must be max(poly_exp)
+Nbits      = 200;               % number of data bits to scramble
+% -----------------------------------------------------
+
+L = max(poly_exp);
+if length(init_state) ~= L
+    error('init_state must have length = max(poly_exp)');
+end
+
+% create random data to test
+data = randi([0 1], 1, Nbits);
+
+% generate PRBS (length Nbits) using LFSR
+prbs = lfsr_prbs(poly_exp, init_state, Nbits);
+
+% scramble (bitwise mod-2 addition i.e. XOR)
+scrambled = mod(data + prbs, 2);
+
+% descramble (XOR again with same PRBS)
+descrambled = mod(scrambled + prbs, 2);
+
+% check
+ber = mean(descrambled ~= data);
+fprintf('BER after descrambling = %.3g (should be 0)\n', ber);
+
+% show a small example
+disp('first 20 bits:');
+disp(table((0:19)', data(1:20)', prbs(1:20)', scrambled(1:20)', descrambled(1:20)', ...
+    'VariableNames', {'idx','data','prbs','scrambled','descrambled'}))
+
+%% --- helper function: LFSR PRBS generator ---
+function prbs = lfsr_prbs(poly_exp, init_state, N)
+% poly_exp : vector of exponents where polynomial is sum(x.^poly_exp) + 1
+% init_state : binary vector length L = max(poly_exp). Leftmost is MSB.
+% N : number of bits to generate
+%
+% Implementation detail:
+% - Register r is a row vector length L, r(1) is MSB (x^L term), r(L) is LSB.
+% - Feedback bit = XOR of register bits at positions corresponding to exponents
+%   excluding the x^0 (1) term. For example poly_exp=[7 4] -> taps at 7 and 4.
+% - On each step we output the last bit r(L) (can be changed if you prefer)
+%   and then shift right inserting feedback at r(1).
+
+L = max(poly_exp);
+r = logical(init_state(:)');   % ensure row vector of 0/1
+if length(r)~=L
+    error('init_state must be length L = max(poly_exp)');
+end
+
+% convert exponents into register indices (1..L). We assume exponents count
+% from L down to 1 mapping: exponent e corresponds to register index (L - e + 1)?
+% To avoid confusion, we define: if poly_exp contains L, that refers to r(1).
+% So index = L - (e-1) -> simplifies to index = L - e + 1.
+tap_idx = arrayfun(@(e) L - e + 1, poly_exp);
+
+prbs = zeros(1, N);
+for i = 1:N
+    % output bit (we output the LSB r(end))
+    prbs(i) = r(end);
+    % feedback = XOR of tapped bits excluding the implicit +1 term
+    fb = mod(sum(r(tap_idx)), 2);
+    % shift: new register = [fb, r(1:end-1)]
+    r = [fb r(1:end-1)];
+end
+prbs = mod(prbs,2);
+end
