@@ -1,0 +1,185 @@
+
+clear; close all; clc
+
+M = 2;                 
+numBits = 1e5;         
+EbNo_dB_vec = 0:2:14;  
+computeBER = true;     
+
+rng(0); 
+
+k = log2(M);                   
+numSym = ceil(numBits/k);      
+bits = randi([0 1], numSym*k, 1);  
+
+symbols = bits_to_symbols(bits, M);
+
+symbols = symbols / sqrt(mean(abs(symbols).^2));
+Es = mean(abs(symbols).^2);    
+Eb = Es / k;
+
+measSNR_dB = zeros(size(EbNo_dB_vec));
+theoSNR_dB = zeros(size(EbNo_dB_vec));
+ber_sim = zeros(size(EbNo_dB_vec));
+ber_theory = zeros(size(EbNo_dB_vec));
+
+
+for idx = 1:length(EbNo_dB_vec)
+    EbNo_dB = EbNo_dB_vec(idx);
+    EbNo = 10^(EbNo_dB/10);
+    N0 = Eb / EbNo;                 
+    sigma = sqrt(N0/2);             
+
+    % create noise (complex if symbols complex)
+    if isreal(symbols)
+        noise = sigma * randn(size(symbols));
+        rx = symbols + noise;
+    else
+        noise = sigma*(randn(size(symbols)) + 1j*randn(size(symbols)));
+        rx = symbols + noise;
+    end
+
+    sigP = mean(abs(symbols).^2);
+    noiseP = mean(abs(noise).^2);
+    measSNR = sigP / noiseP;
+    measSNR_dB(idx) = 10*log10(measSNR);
+
+    
+    theoSNR_linear = EbNo * k * (Eb/Es); % this reduces to EbNo * k when Eb=Es/k, simplifies to EbNo*k*(Eb/Es)=EbNo*k*(1)
+    
+    if isreal(symbols)
+        theoSNR_linear = Es / (sigma^2);   % real case
+    else
+        theoSNR_linear = Es / (2*sigma^2);  % complex case
+    end
+    theoSNR_dB(idx) = 10*log10(theoSNR_linear);
+
+    if computeBER
+        rx_bits = symbols_to_bits(rx, M);
+        rx_bits = rx_bits(1:numBits);  % trim to original number of bits
+        tx_bits = bits(1:numBits);
+        ber_sim(idx) = mean(rx_bits ~= tx_bits);
+
+        if M ==2 % BPSK
+            ber_theory(idx) = 0.5*erfc(sqrt(EbNo));
+        else
+            ber_theory(idx) = NaN; % omit closed form for other modulations in this script
+        end
+    end
+end
+
+figure;
+plot(EbNo_dB_vec, measSNR_dB, '-o','LineWidth',1.5); hold on;
+plot(EbNo_dB_vec, theoSNR_dB, '-s','LineWidth',1.2);
+grid on;
+xlabel('E_b/N_0 (dB)');
+ylabel('SNR (dB)');
+legend('Measured SNR (from data)','Theoretical SNR (from noise variance)','Location','NorthWest');
+title(['Measured vs Theoretical SNR — Modulation: ' modName(M)]);
+
+if computeBER
+    figure;
+    semilogy(EbNo_dB_vec, ber_sim, '-o','LineWidth',1.5); hold on;
+    if M==2
+        semilogy(EbNo_dB_vec, ber_theory, '--','LineWidth',1.2);
+        legend('Simulated BER','Theoretical BPSK BER');
+    else
+        legend('Simulated BER');
+    end
+    grid on;
+    xlabel('E_b/N_0 (dB)');
+    ylabel('BER');
+    title(['BER vs E_b/N_0 — Modulation: ' modName(M)]);
+end
+
+fprintf(' Eb/No(dB)   Theoretical SNR(dB)   Measured SNR(dB)   Sim BER\n');
+for i=1:length(EbNo_dB_vec)
+    if computeBER
+        fprintf('   %2d\t\t  %6.2f\t\t  %6.2f\t    %8.3e\n', EbNo_dB_vec(i), theoSNR_dB(i), measSNR_dB(i), ber_sim(i));
+    else
+        fprintf('   %2d\t\t  %6.2f\t\t  %6.2f\n', EbNo_dB_vec(i), theoSNR_dB(i), measSNR_dB(i));
+    end
+end
+
+function s = bits_to_symbols(b, M)
+    k = log2(M);
+    if M==2
+        b = reshape(b, k, []).';
+        % 0 -> +1, 1-> -1 (NRZ)
+        s = 1 - 2*b(:,1);
+        s = s(:);
+    elseif M==4 
+        b = reshape(b, k, []).';
+        I = 1 - 2*b(:,1);
+        Q = 1 - 2*b(:,2);
+        s = (I + 1j*Q);
+    elseif M==16
+        b = reshape(b, k, []).';
+        Ibits = b(:,1:2);
+        Qbits = b(:,3:4);
+        I = 2*(1 - 2*Ibits(:,1)) + (1 - 2*Ibits(:,2)); % maps to +/-3, +/-1
+        Q = 2*(1 - 2*Qbits(:,1)) + (1 - 2*Qbits(:,2));
+        s = I + 1j*Q;
+    else
+        error('Unsupported M. Use 2,4 or 16.');
+    end
+end
+
+function bits_out = symbols_to_bits(rx, M)
+    k = log2(M);
+    rx = rx(:);
+    if M==2
+        decided = real(rx) < 0; % 1 if negative, 0 if positive
+        bits_out = decided(:);
+    elseif M==4
+        I = real(rx) < 0;
+        Q = imag(rx) < 0;
+        % reverse mapping consistent with bits_to_symbols
+        b = [~I, ~Q]; % approximate reverse of the mapping used above
+        bits_out = b.';
+        bits_out = bits_out(:);
+    elseif M==16
+        I = real(rx);
+        Q = imag(rx);
+        I_levels = 2*floor((I+4)/2)-3; % quick rounding to -3,-1,1,3
+        Q_levels = 2*floor((Q+4)/2)-3;
+        bI = level_to_bits(I_levels);
+        bQ = level_to_bits(Q_levels);
+        bits_out = [bI bQ].';
+        bits_out = bits_out(:);
+    else
+        error('Unsupported M. Use 2,4 or 16.');
+    end
+end
+
+function b2 = level_to_bits(level)
+    b2 = zeros(length(level),2);
+    for ii=1:length(level)
+        switch level(ii)
+            case -3
+                b2(ii,:) = [0 0];
+            case -1
+                b2(ii,:) = [0 1];
+            case 1
+                b2(ii,:) = [1 1];
+            case 3
+                b2(ii,:) = [1 0];
+            otherwise
+                % if rounding error, snap:
+                [~,idx] = min(abs(level(ii)-[-3 -1 1 3]));
+                maps = [-3 -1 1 3];
+                val = maps(idx);
+                if val==-3, b2(ii,:)=[0 0];
+                elseif val==-1, b2(ii,:)=[0 1];
+                elseif val==1, b2(ii,:)=[1 1];
+                else b2(ii,:)=[1 0]; end
+        end
+    end
+end
+
+function name = modName(M)
+    if M==2, name='BPSK';
+    elseif M==4, name='QPSK';
+    elseif M==16, name='16-QAM';
+    else name='Unknown'; end
+end
